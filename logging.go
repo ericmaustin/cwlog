@@ -49,11 +49,9 @@ type Logrus interface {
 	WithField(key string, value interface{}) *logrus.Entry
 }
 
-/*
-Writer represents a single Logger handler that implements the logrus hook interface
-*/
+// Writer represents a single Logger handler that implements the logrus hook interface
 type Writer struct {
-	Writer    io.Writer `validate:"required"`
+	Writer    io.Writer
 	LogLevels []logrus.Level
 	Format    logrus.Formatter
 }
