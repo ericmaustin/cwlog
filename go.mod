@@ -1,4 +1,4 @@
-module cwlog
+module github.com/ericmaustin/cwlog
 
 go 1.16
 
