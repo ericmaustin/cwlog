@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sort"
 	"sync"
 	"syscall"
 	"time"
@@ -207,6 +208,11 @@ func (c *CWLogsWriter) processor() {
 func (c *CWLogsWriter) callCWPutLogEvents() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// sort the buffer by timestamp to prevent out of order issues
+	sort.Slice(c.eventBuffer, func(i, j int) bool {
+		return *c.eventBuffer[i].Timestamp < *c.eventBuffer[j].Timestamp
+	})
 
 	out, err := c.srv.PutLogEvents(&cloudwatchlogs.PutLogEventsInput{
 		LogEvents:     c.eventBuffer,
