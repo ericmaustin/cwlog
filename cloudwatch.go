@@ -204,11 +204,15 @@ func (c *CWLogsWriter) processor() {
 	}
 }
 
-// callCWPutLogEvents calls the PutLogEvents func and clears the buffer if successful
-func (c *CWLogsWriter) callCWPutLogEvents() error {
+// cwPutLogEvents calls the PutLogEvents func and clears the buffer if successful
+func (c *CWLogsWriter) cwPutLogEvents() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if len(c.eventBuffer) < 1 {
+		// do nothing if eventBuffer is empty
+		return nil
+	}
 	// sort the buffer by timestamp to prevent out of order issues
 	sort.Slice(c.eventBuffer, func(i, j int) bool {
 		return *c.eventBuffer[i].Timestamp < *c.eventBuffer[j].Timestamp
@@ -243,7 +247,7 @@ func (c *CWLogsWriter) putEvents(attempt int) error {
 		c.loadSeqToken()
 	}
 
-	err := c.callCWPutLogEvents()
+	err := c.cwPutLogEvents()
 
 	awsErr, ok := err.(awserr.Error)
 	if !ok {
