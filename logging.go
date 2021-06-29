@@ -27,12 +27,14 @@ const (
 // StandardLogger is used in place of a standard logger instance to ensure compatibility with any logger
 type StandardLogger interface {
 	// standard log methods
+
 	Debug(...interface{})
 	Info(...interface{})
 	Warn(...interface{})
 	Error(...interface{})
 	Fatal(...interface{})
 	Panic(...interface{})
+
 	// format log methods
 	Debugf(string, ...interface{})
 	Infof(string, ...interface{})
@@ -76,8 +78,10 @@ func (w *Writer) Fire(entry *logrus.Entry) error {
 	if err != nil {
 		return err
 	}
+
 	// write the formatted output
 	_, err = w.Writer.Write(bt)
+
 	return err
 }
 
@@ -88,6 +92,7 @@ func (w *Writer) AddLevels(levels ...logrus.Level) *Writer {
 	} else {
 		w.LogLevels = append(w.LogLevels, levels...)
 	}
+
 	return w
 }
 
@@ -107,7 +112,6 @@ func (w *Writer) SetFormat(format logrus.Formatter) *Writer {
 
 // New returns a new logrus logger and adds all the hooks
 func New(hooks ...logrus.Hook) (logger *logrus.Logger) {
-
 	logger = logrus.New()
 	logger.SetReportCaller(true)
 
@@ -115,5 +119,6 @@ func New(hooks ...logrus.Hook) (logger *logrus.Logger) {
 	for _, writer := range hooks {
 		logger.AddHook(writer)
 	}
+
 	return
 }

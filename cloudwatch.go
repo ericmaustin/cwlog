@@ -2,6 +2,7 @@ package cwlog
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -10,9 +11,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/cloudwatchlogs"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	cwl "github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs/types"
 )
 
 const (
@@ -24,71 +25,75 @@ const (
 type CWLogsWriter struct {
 	groupName   *string // log group name
 	streamName  *string // log stream to write to
-	groupTags   map[string]*string
+	groupTags   map[string]string
 	kmsKeyID    *string       // the KMS key to use
 	waitTime    time.Duration // amount of time to wait until writing logs to cloudwatch
 	maxEntries  int           // max number of cloud watch entries to save in each batch
-	srv         *cloudwatchlogs.CloudWatchLogs
+	client      *cwl.Client
 	seq         *string
 	ctx         context.Context // context that closing will kill the worker
 	mu          *sync.Mutex
-	eventBuffer []*cloudwatchlogs.InputLogEvent
+	eventBuffer []types.InputLogEvent
 	running     bool
-	eventChan   chan *cloudwatchlogs.InputLogEvent
+	eventChan   chan types.InputLogEvent
+	rejectHandler func(rejects *types.RejectedLogEventsInfo)
 }
 
-//CWLogsOpt is a option passed to NewCWLogWriter
+// CWLogsOpt is a option passed to NewCWLogWriter
 type CWLogsOpt func(cw *CWLogsWriter)
 
-//CWOptMaxEntries sets the log writer's max entries param
+// CWOptMaxEntries sets the log writer's max entries param
 func CWOptMaxEntries(maxEntries int) CWLogsOpt {
 	return func(cw *CWLogsWriter) {
 		cw.maxEntries = maxEntries
 	}
 }
 
-//CWOptWaitTime sets the log writer's max wait time
+// CWOptWaitTime sets the log writer's max wait time
 func CWOptWaitTime(waitTime time.Duration) CWLogsOpt {
 	return func(cw *CWLogsWriter) {
 		cw.waitTime = waitTime
 	}
 }
 
-//CWOptKMSKeyID sets the log writer's kms KEY id
+// CWOptKMSKeyID sets the log writer's kms KEY id
 func CWOptKMSKeyID(kmsKeyID string) CWLogsOpt {
 	return func(cw *CWLogsWriter) {
 		cw.kmsKeyID = &kmsKeyID
 	}
 }
 
-//CWOptGroupTags sets the log writer's  group tags
+// CWOptGroupTags sets the log writer's  group tags
 func CWOptGroupTags(tags map[string]string) CWLogsOpt {
 	return func(cw *CWLogsWriter) {
-		if cw.groupTags == nil {
-			cw.groupTags = make(map[string]*string)
-		}
-
 		for name, tag := range tags {
-			cw.groupTags[name] = &tag
+			cw.groupTags[name] = tag
 		}
 	}
 }
 
-//CWOptEventChanBuffer sets the log writer's event input buffer
+// CWOptEventChanBuffer sets the log writer's event input buffer
 func CWOptEventChanBuffer(buffer int) CWLogsOpt {
 	return func(cw *CWLogsWriter) {
-		cw.eventChan = make(chan *cloudwatchlogs.InputLogEvent, buffer)
+		cw.eventChan = make(chan types.InputLogEvent, buffer)
+	}
+}
+
+// CWOptRejectHandler sets the log writer's reject handler
+func CWOptRejectHandler(h func(rejects *types.RejectedLogEventsInfo)) CWLogsOpt {
+	return func(cw *CWLogsWriter) {
+		cw.rejectHandler = h
 	}
 }
 
 // NewCWLogWriter creates a new CWLogsWriter with given aws session, group name
 // and stream name
-func NewCWLogWriter(ctx context.Context, sess *session.Session, groupName, streamName string, opts ...CWLogsOpt) *CWLogsWriter {
+func NewCWLogWriter(ctx context.Context, cnf aws.Config, groupName, streamName string, opts ...CWLogsOpt) *CWLogsWriter {
 	cw := &CWLogsWriter{
 		ctx:        ctx,
 		groupName:  &groupName,
 		streamName: &streamName,
-		srv:        cloudwatchlogs.New(sess),
+		client:     cwl.NewFromConfig(cnf),
 		mu:         &sync.Mutex{},
 		waitTime:   defaultCWLogsWaitTime,
 		maxEntries: defaultCWLogsMaxEntries,
@@ -104,7 +109,7 @@ func NewCWLogWriter(ctx context.Context, sess *session.Session, groupName, strea
 
 	if cw.eventChan == nil {
 		// no buffer provided in opts so set it to the max entries value
-		cw.eventChan = make(chan *cloudwatchlogs.InputLogEvent, cw.maxEntries)
+		cw.eventChan = make(chan types.InputLogEvent, cw.maxEntries)
 	}
 
 	// start the processor routine
@@ -117,26 +122,31 @@ func NewCWLogWriter(ctx context.Context, sess *session.Session, groupName, strea
 func (c *CWLogsWriter) loadSeqToken() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	limit := int32(1)
 	// describe the event stream
-	cwDescribeInput := &cloudwatchlogs.DescribeLogStreamsInput{
+	cwDescribeInput := &cwl.DescribeLogStreamsInput{
 		LogGroupName:        c.groupName,
 		LogStreamNamePrefix: c.streamName,
+		Limit:               &limit,
 	}
-	streamDesc, err := c.srv.DescribeLogStreams(cwDescribeInput.SetLimit(1))
+	streamDesc, err := c.client.DescribeLogStreams(c.ctx, cwDescribeInput)
 	if err != nil {
 		panic(err)
 	}
+
 	if len(streamDesc.LogStreams) < 1 {
 		return
 	}
+
 	c.seq = streamDesc.LogStreams[0].UploadSequenceToken
 }
 
 //addEvent adds an event to the event buffer
-func (c *CWLogsWriter) addEvent(event *cloudwatchlogs.InputLogEvent) {
+func (c *CWLogsWriter) addEvent(event types.InputLogEvent) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.eventBuffer = append(c.eventBuffer, event)
+	c.mu.Unlock()
 }
 
 //setRunning sets the flag if the processor running
@@ -188,7 +198,9 @@ func (c *CWLogsWriter) processor() {
 				// channel closed
 				return
 			}
+
 			c.addEvent(e)
+
 			if len(c.eventBuffer) >= c.maxEntries {
 				// we're at capacity to put the event and...
 				if err = c.putEvents(0); err != nil {
@@ -213,12 +225,13 @@ func (c *CWLogsWriter) cwPutLogEvents() error {
 		// do nothing if eventBuffer is empty
 		return nil
 	}
+
 	// sort the buffer by timestamp to prevent out of order issues
 	sort.Slice(c.eventBuffer, func(i, j int) bool {
 		return *c.eventBuffer[i].Timestamp < *c.eventBuffer[j].Timestamp
 	})
 
-	out, err := c.srv.PutLogEvents(&cloudwatchlogs.PutLogEventsInput{
+	out, err := c.client.PutLogEvents(c.ctx, &cwl.PutLogEventsInput{
 		LogEvents:     c.eventBuffer,
 		LogGroupName:  c.groupName,
 		LogStreamName: c.streamName,
@@ -228,11 +241,12 @@ func (c *CWLogsWriter) cwPutLogEvents() error {
 	if err == nil {
 		c.seq = out.NextSequenceToken
 		if out.RejectedLogEventsInfo != nil {
-			// print to std out that we have rejected cw events
-			fmt.Printf("REJECTED CW EVENTS: %v\n", out.RejectedLogEventsInfo)
+			if c.rejectHandler != nil {
+				c.rejectHandler(out.RejectedLogEventsInfo)
+			}
 		}
 		// clear the event buffer
-		c.eventBuffer = []*cloudwatchlogs.InputLogEvent{}
+		c.eventBuffer = []types.InputLogEvent{}
 		return nil
 	}
 
@@ -249,26 +263,25 @@ func (c *CWLogsWriter) putEvents(attempt int) error {
 
 	err := c.cwPutLogEvents()
 
-	awsErr, ok := err.(awserr.Error)
-	if !ok {
-		// error is not an aws error
-		return err
-	}
+	var (
+		resourceNotFoundException *types.ResourceNotFoundException
+		invalidSequenceTokenException *types.InvalidSequenceTokenException
+	)
 
-	// error IS an aws error
-	switch awsErr.Code() {
-	case cloudwatchlogs.ErrCodeResourceNotFoundException:
-		// the group or stream was not found
-		if err = c.createStream(0); err != nil {
-			// error trying to create the stream
+	if err != nil {
+		switch {
+		case errors.As(err, &resourceNotFoundException):
+			// the group or stream was not found
+			if err = c.createStream(0); err != nil {
+				// error trying to create the stream
+				return err
+			}
+		case errors.As(err, &invalidSequenceTokenException):
+			c.loadSeqToken()
+		default:
+			// unknown error
 			return err
 		}
-	case cloudwatchlogs.ErrCodeInvalidSequenceTokenException:
-		// sequence was incorrect
-		c.loadSeqToken()
-	default:
-		// unknown error
-		return err
 	}
 
 	// try again
@@ -283,34 +296,31 @@ func (c *CWLogsWriter) putEvents(attempt int) error {
 
 // createStream creates the cloudwatch stream
 func (c *CWLogsWriter) createStream(attempt int) error {
-	createStreamInput := &cloudwatchlogs.CreateLogStreamInput{
+	createStreamInput := &cwl.CreateLogStreamInput{
 		LogGroupName:  c.groupName,
 		LogStreamName: c.streamName,
 	}
 
 	// attempt to create the missing stream
-	_, err := c.srv.CreateLogStream(createStreamInput)
+	_, err := c.client.CreateLogStream(c.ctx, createStreamInput)
 
 	if err == nil {
 		return nil
 	}
 
-	awsErr, ok := err.(awserr.Error)
-	if !ok {
-		// not a AWS error, return it
-		return err
-	}
-	switch awsErr.Code() {
-	case cloudwatchlogs.ErrCodeResourceAlreadyExistsException:
+	var (
+		resourceAlreadyExistsException *types.ResourceAlreadyExistsException
+		resourceNotFoundException *types.ResourceNotFoundException
+	)
+
+	switch {
+	case errors.As(err, &resourceAlreadyExistsException):
 		// already exists!
 		return nil
-	case cloudwatchlogs.ErrCodeResourceNotFoundException:
+	case errors.As(err, &resourceNotFoundException):
 		if err = c.createGroup(0); err != nil {
 			return err
 		}
-	default:
-		// different error, return it
-		return err
 	}
 
 	attempt++
@@ -325,22 +335,19 @@ func (c *CWLogsWriter) createStream(attempt int) error {
 //createGroup creates the cloudwatch group
 func (c *CWLogsWriter) createGroup(attempt int) error {
 	// attempt to create the missing cloudwatch log group
-	_, err := c.srv.CreateLogGroup(&cloudwatchlogs.CreateLogGroupInput{
+	_, err := c.client.CreateLogGroup(c.ctx, &cwl.CreateLogGroupInput{
 		KmsKeyId:     c.kmsKeyID,
 		LogGroupName: c.groupName,
 		Tags:         c.groupTags,
 	})
+
 	if err == nil {
 		return nil
 	}
 
-	awsErr, ok := err.(awserr.Error)
-	if !ok {
-		// not a AWS error, return it
-		return err
-	}
-	switch awsErr.Code() {
-	case cloudwatchlogs.ErrCodeResourceAlreadyExistsException:
+	var resourceAlreadyExistsException *types.ResourceAlreadyExistsException
+
+	if errors.As(err, &resourceAlreadyExistsException) {
 		// already exists!
 		return nil
 	}
@@ -359,7 +366,7 @@ func (c *CWLogsWriter) Write(p []byte) (n int, err error) {
 	msg := string(p)
 	ts := time.Now().UnixNano() / int64(time.Millisecond)
 	// push the event into the event channel
-	c.eventChan <- &cloudwatchlogs.InputLogEvent{
+	c.eventChan <- types.InputLogEvent{
 		Message:   &msg,
 		Timestamp: &ts,
 	}
