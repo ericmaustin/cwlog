@@ -157,9 +157,10 @@ func (c *CWLogsWriter) setRunning(running bool) {
 	c.running = running
 }
 
-//processor runs in a go routine and handles pushing events to CW or adding events to the buffer
+// processor runs in a go routine and handles pushing events to CW or adding events to the buffer
 func (c *CWLogsWriter) processor() {
 	c.setRunning(true)
+
 	defer func() {
 		c.setRunning(false)
 		// put remaining events
@@ -208,7 +209,6 @@ func (c *CWLogsWriter) processor() {
 				if err = c.putEvents(0); err != nil {
 					panic(err)
 				}
-				//... reset the ticker
 				ticker = time.NewTicker(c.waitTime)
 			}
 		case <-c.ctx.Done():
