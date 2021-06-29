@@ -131,6 +131,7 @@ func (c *CWLogsWriter) loadSeqToken() {
 		Limit:               &limit,
 	}
 	streamDesc, err := c.client.DescribeLogStreams(c.ctx, cwDescribeInput)
+
 	if err != nil {
 		panic(err)
 	}
@@ -142,14 +143,14 @@ func (c *CWLogsWriter) loadSeqToken() {
 	c.seq = streamDesc.LogStreams[0].UploadSequenceToken
 }
 
-//addEvent adds an event to the event buffer
+// addEvent adds an event to the event buffer
 func (c *CWLogsWriter) addEvent(event types.InputLogEvent) {
 	c.mu.Lock()
 	c.eventBuffer = append(c.eventBuffer, event)
 	c.mu.Unlock()
 }
 
-//setRunning sets the flag if the processor running
+// setRunning sets the flag if the processor running
 func (c *CWLogsWriter) setRunning(running bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -176,6 +177,7 @@ func (c *CWLogsWriter) processor() {
 		// if we get an os signal then try to write all the events in the buffer
 		s := <-osSignal
 		fmt.Printf("got os signal %s, attempting to write buffered events to cloudwatch\n", s)
+
 		if err := c.putEvents(0); err != nil {
 			panic(err)
 		}
@@ -247,6 +249,7 @@ func (c *CWLogsWriter) cwPutLogEvents() error {
 		}
 		// clear the event buffer
 		c.eventBuffer = []types.InputLogEvent{}
+
 		return nil
 	}
 
@@ -332,7 +335,7 @@ func (c *CWLogsWriter) createStream(attempt int) error {
 	return err
 }
 
-//createGroup creates the cloudwatch group
+// createGroup creates the cloudwatch group
 func (c *CWLogsWriter) createGroup(attempt int) error {
 	// attempt to create the missing cloudwatch log group
 	_, err := c.client.CreateLogGroup(c.ctx, &cwl.CreateLogGroupInput{
@@ -370,5 +373,6 @@ func (c *CWLogsWriter) Write(p []byte) (n int, err error) {
 		Message:   &msg,
 		Timestamp: &ts,
 	}
+
 	return len(p), nil
 }
