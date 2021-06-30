@@ -64,6 +64,7 @@ func (w *Writer) Levels() []logrus.Level {
 	if w.LogLevels == nil || len(w.LogLevels) == 0 {
 		w.LogLevels = []logrus.Level{TRACE, DEBUG, INFO, WARNING, ERROR, FATAL, PANIC}
 	}
+
 	return w.LogLevels
 }
 
@@ -74,7 +75,9 @@ func (w *Writer) Fire(entry *logrus.Entry) error {
 			FullTimestamp: true,
 		}
 	}
+
 	bt, err := w.Format.Format(entry)
+
 	if err != nil {
 		return err
 	}
